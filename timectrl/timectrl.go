@@ -1,6 +1,7 @@
 package timectrl
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -14,37 +15,68 @@ type TimeController struct {
 	start      time.Time
 	ticker     *time.Ticker
 	timer      *time.Timer
-	triggerEnd chan struct{}
+	stopTicker chan struct{}
+	stopTimer  chan struct{}
 }
 
-func (tc *TimeController) RunTicker(wg sync.WaitGroup) {
+func (tc *TimeController) RunTicker(wg *sync.WaitGroup) {
 	defer wg.Done()
+	defer close(tc.IntervalCh)
+	defer close(tc.stopTicker)
+	defer fmt.Println("ticker says done")
 
 	for {
 		select {
 		case <-tc.ticker.C:
 			tc.IntervalCh <- struct{}{}
-		case <-tc.triggerEnd:
+		case <-tc.stopTicker:
 			tc.ticker.Stop()
 			return
 		}
 	}
 }
 
-func (tc *TimeController) RunTimer(wg sync.WaitGroup) {
+func (tc *TimeController) RunTimer(wg *sync.WaitGroup) {
+	defer wg.Done()
+	defer close(tc.DoneCh)
+	defer close(tc.stopTimer)
+	defer fmt.Println("timer says done")
+
 	select {
 	case <-tc.timer.C:
 		tc.DoneCh <- struct{}{}
-	case <-tc.triggerEnd:
+	case <-tc.stopTimer:
 		tc.timer.Stop()
+		return
 	}
-
-	wg.Done()
 }
 
-func (tc *TimeController) Stop() {
-	tc.triggerEnd <- struct{}{}
-	tc.triggerEnd <- struct{}{}
+func (tc *TimeController) StopTicker() error {
+	if tc.ticker != nil {
+		tc.stopTicker <- struct{}{}
+		fmt.Println("ticker stopped")
+		return nil
+	}
+
+	return errors.New("ticker is not running")
+}
+
+func (tc *TimeController) StopTimer() error {
+	if tc.timer != nil {
+		tc.stopTimer <- struct{}{}
+		fmt.Println("timer stopped")
+		return nil
+	}
+
+	return errors.New("timer is not running")
+}
+
+func (tc *TimeController) StopAll() {
+	tickerErr := tc.StopTicker()
+	timerErr := tc.StopTimer()
+	if tickerErr != nil || timerErr != nil {
+		panic(fmt.Sprintf(tickerErr.Error(), timerErr.Error()))
+	}
 }
 
 func (tc *TimeController) TimePassed() time.Duration {
@@ -77,7 +109,8 @@ func NewTimeController(opts ...ControllerOption) *TimeController {
 		ticker:     nil,
 		timer:      nil,
 		start:      time.Now(),
-		triggerEnd: make(chan struct{}),
+		stopTicker: make(chan struct{}),
+		stopTimer:  make(chan struct{}),
 	}
 
 	for _, opt := range opts {

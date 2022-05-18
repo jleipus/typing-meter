@@ -16,7 +16,7 @@ var (
 	procGetAsyncKeyState = user32.NewProc("GetAsyncKeyState")
 )
 
-var keyPollingDelay time.Duration = 10
+const keyPollingDelay time.Duration = 10
 
 var wg = sync.WaitGroup{}
 
@@ -32,35 +32,35 @@ func main() {
 
 	tc := timectrl.NewTimeController(timectrl.WithTicker(*interval), timectrl.WithTimer(*limit))
 
-	go tc.RunTicker(wg)
-	go tc.RunTimer(wg)
-	go readInput(tc)
+	go tc.RunTicker(&wg)
+	go tc.RunTimer(&wg)
+	go readInput(tc, *interval)
 
 	wg.Wait()
 }
 
-func readInput(tc *timectrl.TimeController) {
+func readInput(tc *timectrl.TimeController, interval int) {
 	var keys []byte
 	var index int
 
 	var lastKey int
 	var activeKey int
 
-loop:
-	for {
+	isFinished := false
+	for !isFinished {
 		activeKey = readKey() // Gets value of pressed key
 
 		if activeKey != 0 { // If a key is pressed
 			if activeKey != lastKey { // If not holding down same key
-				fmt.Println(activeKey)
-
 				lastKey = activeKey
 				keys = append(keys, byte(activeKey))
 
-				startIndex := 0
-				if len(keys) >= 5 {
-					startIndex = len(keys) - 5
-				}
+				startIndex := func(len int) int {
+					if len-5 < 0 {
+						return 0
+					}
+					return len - 5
+				}(len(keys))
 
 				input := string(keys[startIndex:]) // Converting last 5 characters to one string
 
@@ -71,15 +71,19 @@ loop:
 					fmt.Println("Type END to stop meter")
 
 					// Resetting all variables to initial values
-					tc = timectrl.NewTimeController(timectrl.WithTicker(5))
-					go tc.RunTicker(wg)
+					tc.StopAll()
+					tc = timectrl.NewTimeController(timectrl.WithTicker(interval))
+
+					wg.Add(1)
+					go tc.RunTicker(&wg)
 
 					keys = nil
 					index = 0
 				case strings.Contains(input, "END"):
 					if !tc.TimedMode {
 						fmt.Println("\nCommand received: END")
-						tc.Stop()
+						tc.StopTicker()
+						isFinished = true
 					}
 				}
 			}
@@ -95,7 +99,8 @@ loop:
 
 			index = len(keys) // Saving new index for next interval
 		case <-tc.DoneCh:
-			break loop
+			tc.StopTicker()
+			isFinished = true
 		default:
 			time.Sleep(keyPollingDelay * time.Millisecond)
 		}
@@ -136,8 +141,10 @@ func calculateStats(keys []byte, totalKeyCount int, tc *timectrl.TimeController)
 	fmt.Printf("Typing speed: %.2f\n", speed)
 
 	fmt.Println("Most pressed keys:")
-	for i, p := range sorted[:3] {
-		fmt.Printf("%v. \"%v\": %v\n", i+1, p.Key, p.Value)
+	for i := 0; i < 3; i++ {
+		if i < sorted.Len() {
+			fmt.Printf("%v. \"%v\": %v\n", i+1, sorted[i].Key, sorted[i].Value)
+		}
 	}
 
 	wg.Done()
