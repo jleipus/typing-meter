@@ -23,7 +23,6 @@ func (tc *TimeController) RunTicker(wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer close(tc.IntervalCh)
 	defer close(tc.stopTicker)
-	defer fmt.Println("ticker says done")
 
 	for {
 		select {
@@ -40,7 +39,6 @@ func (tc *TimeController) RunTimer(wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer close(tc.DoneCh)
 	defer close(tc.stopTimer)
-	defer fmt.Println("timer says done")
 
 	select {
 	case <-tc.timer.C:
@@ -54,7 +52,6 @@ func (tc *TimeController) RunTimer(wg *sync.WaitGroup) {
 func (tc *TimeController) StopTicker() error {
 	if tc.ticker != nil {
 		tc.stopTicker <- struct{}{}
-		fmt.Println("ticker stopped")
 		return nil
 	}
 
@@ -64,7 +61,6 @@ func (tc *TimeController) StopTicker() error {
 func (tc *TimeController) StopTimer() error {
 	if tc.timer != nil {
 		tc.stopTimer <- struct{}{}
-		fmt.Println("timer stopped")
 		return nil
 	}
 
@@ -88,7 +84,6 @@ type ControllerOption func(tc *TimeController)
 func WithTicker(interval int) ControllerOption {
 	return func(tc *TimeController) {
 		tc.ticker = time.NewTicker(time.Duration(interval) * time.Second)
-		fmt.Println("ticker started")
 	}
 }
 
@@ -96,7 +91,6 @@ func WithTimer(limit int) ControllerOption {
 	return func(tc *TimeController) {
 		tc.timer = time.NewTimer(time.Duration(limit) * time.Second)
 		tc.TimedMode = true
-		fmt.Println("timer started")
 	}
 }
 
@@ -117,6 +111,5 @@ func NewTimeController(opts ...ControllerOption) *TimeController {
 		opt(&tc)
 	}
 
-	fmt.Println("timeController created")
 	return &tc
 }
