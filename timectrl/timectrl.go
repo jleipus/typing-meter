@@ -1,80 +1,77 @@
 package timectrl
 
 import (
-	"errors"
-	"fmt"
 	"sync"
 	"time"
 )
 
+// TimeController A data structure to allow passing of signals between a timer, ticker and
+// functions waiting for those signals
 type TimeController struct {
 	IntervalCh chan struct{}
 	DoneCh     chan struct{}
 	TimedMode  bool
 
-	start      time.Time
-	ticker     *time.Ticker
-	timer      *time.Timer
-	stopTicker chan struct{}
-	stopTimer  chan struct{}
+	start        time.Time
+	ticker       *time.Ticker
+	timer        *time.Timer
+	stopTickerCh chan struct{}
+	stopTimerCh  chan struct{}
 }
 
+// Runs the ticker until stopTicker channel receives data
 func (tc *TimeController) RunTicker(wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer close(tc.IntervalCh)
-	defer close(tc.stopTicker)
+	defer close(tc.stopTickerCh)
 
 	for {
 		select {
 		case <-tc.ticker.C:
 			tc.IntervalCh <- struct{}{}
-		case <-tc.stopTicker:
+		case <-tc.stopTickerCh:
 			tc.ticker.Stop()
 			return
 		}
 	}
 }
 
+// Runs the timer until stopTimer channel receives data
 func (tc *TimeController) RunTimer(wg *sync.WaitGroup) {
 	defer wg.Done()
 	defer close(tc.DoneCh)
-	defer close(tc.stopTimer)
+	defer close(tc.stopTimerCh)
 
 	select {
 	case <-tc.timer.C:
 		tc.DoneCh <- struct{}{}
-	case <-tc.stopTimer:
+	case <-tc.stopTimerCh:
 		tc.timer.Stop()
 		return
 	}
 }
 
-func (tc *TimeController) StopTicker() error {
+// If the ticker is running, sends signal to stop it
+func (tc *TimeController) stopTicker() {
 	if tc.ticker != nil {
-		tc.stopTicker <- struct{}{}
-		return nil
+		tc.stopTickerCh <- struct{}{}
 	}
-
-	return errors.New("ticker is not running")
 }
 
-func (tc *TimeController) StopTimer() error {
+// If the timer is running, sends signal to stop it, else returns error
+func (tc *TimeController) stopTimer() {
 	if tc.timer != nil {
-		tc.stopTimer <- struct{}{}
-		return nil
+		tc.stopTimerCh <- struct{}{}
 	}
-
-	return errors.New("timer is not running")
 }
 
+// A function to stop both the ticker and timer
 func (tc *TimeController) StopAll() {
-	tickerErr := tc.StopTicker()
-	timerErr := tc.StopTimer()
-	if tickerErr != nil || timerErr != nil {
-		panic(fmt.Sprintf(tickerErr.Error(), timerErr.Error()))
-	}
+	tc.stopTicker()
+	tc.stopTimer()
 }
 
+// Returns the time passed since the TimeController was created
 func (tc *TimeController) TimePassed() time.Duration {
 	return time.Since(tc.start)
 }
@@ -94,17 +91,19 @@ func WithTimer(limit int) ControllerOption {
 	}
 }
 
+// Variadic function that takes ControllerOption returning functions
+// as parameters and runs them
 func NewTimeController(opts ...ControllerOption) *TimeController {
 	tc := TimeController{
 		IntervalCh: make(chan struct{}),
 		DoneCh:     make(chan struct{}),
 		TimedMode:  false,
 
-		ticker:     nil,
-		timer:      nil,
-		start:      time.Now(),
-		stopTicker: make(chan struct{}),
-		stopTimer:  make(chan struct{}),
+		ticker:       nil,
+		timer:        nil,
+		start:        time.Now(),
+		stopTickerCh: make(chan struct{}),
+		stopTimerCh:  make(chan struct{}),
 	}
 
 	for _, opt := range opts {

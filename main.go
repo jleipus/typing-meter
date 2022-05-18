@@ -83,7 +83,7 @@ func readInput(tc *timectrl.TimeController, interval int) {
 				case strings.Contains(input, "END"):
 					if !tc.TimedMode {
 						fmt.Println("\nCommand received: END")
-						tc.StopTicker()   // Since timer should not be running, stopping only ticker
+						tc.StopAll()      // Since timer should not be running, stopping only ticker
 						isFinished = true // Setting loop finishing condition
 					}
 				}
@@ -101,7 +101,7 @@ func readInput(tc *timectrl.TimeController, interval int) {
 
 			index = len(keys)
 		case <-tc.DoneCh: // Received from TimeController.timer
-			tc.StopTicker()
+			tc.StopAll()
 			isFinished = true
 		default:
 			time.Sleep(keyPollingDelay * time.Millisecond)
