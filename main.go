@@ -7,8 +7,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"typingMeter/mapsort"
-	"typingMeter/timectrl"
+	"typing-meter/mapsort"
+	"typing-meter/timectrl"
 )
 
 var (
