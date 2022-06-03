@@ -1,4 +1,4 @@
-# typingMeter
+# typing-meter
  
 Pass parameters with command-line flags:  
 ```bash
