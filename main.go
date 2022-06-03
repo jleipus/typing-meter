@@ -1,15 +1,14 @@
 package main
 
 import (
-	"bufio"
+	"flag"
 	"fmt"
-	"os"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"typingMeter/mapsort"
+	"typingMeter/timectrl"
 )
 
 var (
@@ -17,68 +16,40 @@ var (
 	procGetAsyncKeyState = user32.NewProc("GetAsyncKeyState")
 )
 
-var keyPollingDelay time.Duration = 10
+// Delay in MS between key reads
+const keyPollingDelay time.Duration = 10
 
 var wg = sync.WaitGroup{}
 
-var intervalCh = make(chan struct{})  // Triggers interval stat calculation
-var doneCh = make(chan struct{})      // Triggers end of logging
-var timeCh = make(chan time.Duration) // Passes elapsed time to calculateStats()
-
-// TimeControls All necessary variables for controlling timed events
-type TimeControls struct {
-	interval   int
-	limit      int
-	start      time.Time
-	ticker     *time.Ticker
-	timer      *time.Timer
-	timedMode  bool
-	triggerEnd chan struct{}
-}
-
 func main() {
-	scanner := bufio.NewScanner(os.Stdin)
+	interval := flag.Int("interval", 5, "time in seconds between intervals")
+	limit := flag.Int("limit", 20, "time limit in seconds")
+	flag.Parse()
+
 	fmt.Println("Typing Meter")
 	fmt.Println("---------------------")
 
-	fmt.Print("Enter interval time: ")
-	scanner.Scan()
-	interval, _ := strconv.Atoi(scanner.Text())
+	wg.Add(3)
 
-	fmt.Print("Enter time limit: ")
-	scanner.Scan()
-	limit, _ := strconv.Atoi(scanner.Text())
+	// Creating new TimeController with a ticker and timer
+	tc := timectrl.NewTimeController(timectrl.WithTicker(*interval), timectrl.WithTimer(*limit))
 
-	wg.Add(2)
-
-	timeControls := TimeControls{
-		interval:   interval,
-		limit:      limit,
-		start:      time.Now(),
-		ticker:     time.NewTicker(time.Duration(interval) * time.Second),
-		timer:      time.NewTimer(time.Duration(limit) * time.Second),
-		timedMode:  true,
-		triggerEnd: make(chan struct{}),
-	}
-
-	fmt.Println("\nStarting meter")
-	fmt.Println("---------------------")
-
-	go readInput(&timeControls)
-	go timeController(&timeControls)
+	go tc.RunTicker(&wg)
+	go tc.RunTimer(&wg)
+	go readInput(tc, *interval)
 
 	wg.Wait()
 }
 
-func readInput(timeControls *TimeControls) {
-	var keys []byte
-	var index int
+func readInput(tc *timectrl.TimeController, interval int) {
+	var keys []byte // Byte slice for all keypresses
+	var index int   // Index of the last keypress of the previous interval
 
 	var lastKey int
 	var activeKey int
 
-loop:
-	for {
+	isFinished := false
+	for !isFinished {
 		activeKey = readKey() // Gets value of pressed key
 
 		if activeKey != 0 { // If a key is pressed
@@ -86,50 +57,52 @@ loop:
 				lastKey = activeKey
 				keys = append(keys, byte(activeKey))
 
-				startIndex := 0
-				if len(keys) >= 5 {
-					startIndex = len(keys) - 5
-				}
+				// If less than 5 keys have been logged, set startIndex to 0
+				startIndex := func(len int) int {
+					if len-5 < 0 {
+						return 0
+					}
+					return len - 5
+				}(len(keys))
 
-				input := string(keys[startIndex:]) // Converting last 5 characters to one string
-
+				input := string(keys[startIndex:]) // Convert last 5(or less if len(keys) < 5) bytes into string
 				switch {
 				case strings.Contains(input, "START"):
 					fmt.Println("\nCommand received: START")
 					fmt.Println("Switching from timed mode to manual mode")
 					fmt.Println("Type END to stop meter")
 
-					// Resetting all variables to initial values
-					timeControls.start = time.Now()
-					timeControls.ticker.Reset(time.Duration(timeControls.interval) * time.Second)
-					timeControls.timer.Stop()
-					timeControls.timedMode = false
+					tc.StopAll()                                                   // Stops the timer and ticker
+					tc = timectrl.NewTimeController(timectrl.WithTicker(interval)) // Creating new TimeController with only a ticker
+
+					wg.Add(1)
+					go tc.RunTicker(&wg)
 
 					keys = nil
 					index = 0
 				case strings.Contains(input, "END"):
-					if !timeControls.timedMode {
+					if !tc.TimedMode {
 						fmt.Println("\nCommand received: END")
-						timeControls.triggerEnd <- struct{}{} // Sending trigger to timeController()
+						tc.StopAll()      // Since timer should not be running, stopping only ticker
+						isFinished = true // Setting loop finishing condition
 					}
 				}
 			}
 		} else {
-			lastKey = 0
+			lastKey = 0 // Prevents holding down a key from being counted as keypress every cycle
 		}
 
 		select {
-		case <-intervalCh:
+		case <-tc.IntervalCh: // Received from TimeController.ticker
 			wg.Add(1)
 			fmt.Println("\nInterval statistics:")
-			go calculateStats(keys[index:], len(keys), false) // Sending slice with only the keys pressed during last interval
+			k := keys[index:]
+			go calculateStats(&k, len(keys), tc) // Passing only the keys from last interval
 
-			index = len(keys) // Saving new index for next interval
-		case <-doneCh:
-			close(doneCh)
-			close(intervalCh)
-
-			break loop
+			index = len(keys)
+		case <-tc.DoneCh: // Received from TimeController.timer
+			tc.StopAll()
+			isFinished = true
 		default:
 			time.Sleep(keyPollingDelay * time.Millisecond)
 		}
@@ -137,16 +110,20 @@ loop:
 
 	wg.Add(1)
 	fmt.Println("\nSession complete, overall statistics:")
-	go calculateStats(keys, len(keys), true)
+	go calculateStats(&keys, len(keys), tc)
 
 	wg.Done()
 }
 
 func readKey() (activeKey int) {
-	for i := 0; i < 256; i++ {
+	for i := 0; i < 0xFF; i++ {
 		keyState, _, _ := procGetAsyncKeyState.Call(uintptr(i)) // Checking keystate for all keys in range (0, 255)
 
-		if keyState&(1<<15) != 0 && !(i < 0x2F && i != 0x20) && (i < 160 || i > 165) && (i < 91 || i > 93) { // If key is pressed and satisfies conditions
+		// From documentation
+		// `if the least significant bit is set, the key was pressed after the previous call to GetAsyncKeyState.`
+		// https://docs.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getasynckeystate
+		// if keyState&(1<<15) != 0 && !(i < 0x2F && i != 0x20) && (i < 160 || i > 165) && (i < 91 || i > 93) {
+		if keyState&(1<<15) != 0 {
 			activeKey = i
 			break
 		} else {
@@ -157,31 +134,21 @@ func readKey() (activeKey int) {
 	return activeKey
 }
 
-func calculateStats(keys []byte, totalKeyCount int, end bool) {
-	timeElapsed := <-timeCh // Receiving time since session start
-	if end {
-		fmt.Printf("Total time elapsed: %v\n", timeElapsed)
-		close(timeCh)
-	}
+func calculateStats(keys *[]byte, totalKeyCount int, tc *timectrl.TimeController) {
+	timeElapsed := tc.TimePassed() // Receiving time since session start
 
-	total := len(keys)
+	total := len(*keys)
 	speed := float64(totalKeyCount) / timeElapsed.Seconds()
 
-	// Iterating over keys and increasing appropriate value in map
-	popularityMap := make(map[string]int)
-	for _, key := range keys {
-		popularityMap[string(key)]++
-	}
-
-	// Function takes map as parameter and returns slice of structs with Key and Value properties
-	sorted := sortMapByValue(popularityMap)
+	popularityMap := sliceToMap(*keys)              // Map of all keys pressed and times they were pressed
+	sorted := mapsort.SortMapByValue(popularityMap) // Sorted map returned as PairList
 
 	fmt.Printf("Keys pressed: %v\n", total)
 	fmt.Printf("Typing speed: %.2f\n", speed)
 
 	fmt.Println("Most pressed keys:")
 	for i := 0; i < 3; i++ {
-		if len(sorted) > i {
+		if i < sorted.Len() {
 			fmt.Printf("%v. \"%v\": %v\n", i+1, sorted[i].Key, sorted[i].Value)
 		}
 	}
@@ -189,52 +156,13 @@ func calculateStats(keys []byte, totalKeyCount int, end bool) {
 	wg.Done()
 }
 
-func timeController(timeControls *TimeControls) {
-loop:
-	for {
-		select {
-		case <-timeControls.triggerEnd: // Waits for manual trigger of end
-			timeControls.ticker.Stop()
-			doneCh <- struct{}{}
-			timeCh <- time.Since(timeControls.start)
-
-			break loop
-		case <-timeControls.timer.C: // Waits for timed trigger of end
-			timeControls.ticker.Stop()
-			doneCh <- struct{}{}
-			timeCh <- time.Since(timeControls.start)
-
-			break loop
-		case <-timeControls.ticker.C: // Waits for interval trigger
-			intervalCh <- struct{}{}
-			timeCh <- time.Since(timeControls.start)
-		}
+// Takes slice of bytes and returns a map with all unique values and times
+// they appear in the slice
+func sliceToMap(s []byte) map[string]int {
+	ret := make(map[string]int)
+	for _, key := range s {
+		ret[string(key)]++
 	}
 
-	wg.Done()
-}
-
-// Pair A data structure to hold a key/value pair.
-type Pair struct {
-	Key   string
-	Value int
-}
-
-// PairList A slice of Pairs that implements sort.Interface to sort by Value.
-type PairList []Pair
-
-func (p PairList) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
-func (p PairList) Len() int           { return len(p) }
-func (p PairList) Less(i, j int) bool { return p[i].Value < p[j].Value }
-
-// A function to turn a map into a PairList, then sort and return it.
-func sortMapByValue(m map[string]int) PairList {
-	p := make(PairList, len(m))
-	i := 0
-	for k, v := range m {
-		p[i] = Pair{k, v}
-		i++
-	}
-	sort.Sort(sort.Reverse(p))
-	return p
+	return ret
 }
